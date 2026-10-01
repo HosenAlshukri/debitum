@@ -1,8 +1,13 @@
 package org.ebur.debitum.ui.edit_transaction;
 
+import android.content.ActivityNotFoundException;
+import android.content.ClipData;
 import android.content.Context;
+import android.content.Intent;
 import android.graphics.drawable.TransitionDrawable;
+import android.net.Uri;
 import android.os.Bundle;
+import android.provider.MediaStore;
 import android.text.Editable;
 import android.text.TextUtils;
 import android.text.TextWatcher;
@@ -21,8 +26,10 @@ import android.widget.Toast;
 import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
 import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.widget.Toolbar;
+import androidx.core.content.FileProvider;
 import androidx.fragment.app.DialogFragment;
 import androidx.lifecycle.ViewModelProvider;
 import androidx.navigation.NavBackStackEntry;
@@ -72,6 +79,10 @@ public class EditTransactionFragment extends DialogFragment {
     public static final String ARG_PRESET_RETURNDATE = "presetReturndate";
 
     private final static String IMAGE_SUBDIR = "transaction-images";
+    // camera apps return JPEG (or HEIF, which every downstream consumer tolerates), so unlike
+    // the gallery path we cannot (and must not) query the extension from a content uri
+    private final static String CAMERA_IMAGE_EXTENSION = "jpg";
+    private final static String STATE_PENDING_CAPTURE = "pendingCaptureFilename";
 
     private EditTransactionViewModel viewModel;
     private PersonFilterViewModel personFilterViewModel;
@@ -91,6 +102,10 @@ public class EditTransactionFragment extends DialogFragment {
     private AutoCompleteTextView editReturnDate;
     private RecyclerView imageRecyclerView;
     private EditTransactionImageAdapter imageAdapter;
+    // name of the image file the camera app is currently writing to. It has to be determined
+    // before launching the camera and kept across configuration changes and process death,
+    // otherwise the captured image would end up on disk but never linked to the transaction.
+    @Nullable private String pendingCaptureFilename;
 
     // launcher for picking a new image file
     protected final ActivityResultLauncher<String> addImageLauncher =
@@ -116,10 +131,28 @@ public class EditTransactionFragment extends DialogFragment {
                         }
                     });
 
+    // launcher for taking a new image file with the camera app
+    private final ActivityResultLauncher<Uri> takePictureLauncher =
+            registerForActivityResult(
+                    new TakePictureWithUriGrants(),
+                    success -> onPictureCaptured(success != null && success));
+
     @Override
     public void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        // must be restored before the ActivityResultRegistry dispatches a pending result
+        if (savedInstanceState != null) {
+            pendingCaptureFilename = savedInstanceState.getString(STATE_PENDING_CAPTURE);
+        }
         setStyle(DialogFragment.STYLE_NO_FRAME, R.style.Theme_Debitum_FullScreenDialog);
+    }
+
+    @Override
+    public void onSaveInstanceState(@NonNull Bundle outState) {
+        super.onSaveInstanceState(outState);
+        if (pendingCaptureFilename != null) {
+            outState.putString(STATE_PENDING_CAPTURE, pendingCaptureFilename);
+        }
     }
 
     @Override
@@ -236,13 +269,16 @@ public class EditTransactionFragment extends DialogFragment {
 
     @Override
     public void dismiss() {
-        viewModel.deleteOrphanedImageFiles(getImageDir());
+        File imageDir = getImageDirOrNull();
+        if (imageDir != null) {
+            viewModel.deleteOrphanedImageFiles(imageDir);
+        }
         super.dismiss();
     }
 
     private void setupRecyclerView(@NonNull View root) {
         imageRecyclerView = root.findViewById(R.id.images);
-        imageAdapter = new EditTransactionImageAdapter(new EditTransactionImageAdapter.Diff(), addImageLauncher, imagefile -> {
+        imageAdapter = new EditTransactionImageAdapter(new EditTransactionImageAdapter.Diff(), this::showAddImageDialog, imagefile -> {
             viewModel.deleteImageLink(imagefile.getName()); // the actual file will be deleted by deleteOrphanedImageFiles on save/dismiss
         });
         imageRecyclerView.setAdapter(imageAdapter);
@@ -259,7 +295,10 @@ public class EditTransactionFragment extends DialogFragment {
 
     private void updateAdapterList(List<String> filenames) {
         List<File> images = new ArrayList<>();
-        File imagedir = getImageDir();
+        File imagedir = getImageDirOrNull();
+        if (imagedir == null) {
+            return;
+        }
         if (!imagedir.exists()) {
             imagedir.mkdirs();
         }
@@ -271,6 +310,97 @@ public class EditTransactionFragment extends DialogFragment {
         }
         images.add(null); // the null element makes the viewHolder display the "add image" placeholder
         imageAdapter.submitList(images);
+    }
+
+    /**
+     * Lets the user choose whether the new image should come from the gallery or the camera.
+     */
+    private void showAddImageDialog() {
+        new MaterialAlertDialogBuilder(requireContext())
+                .setTitle(R.string.edit_transaction_image_add_title)
+                .setItems(new CharSequence[]{
+                                getString(R.string.edit_transaction_image_source_gallery),
+                                getString(R.string.edit_transaction_image_source_camera)},
+                        (dialog, which) -> {
+                            if (which == 0) addImageLauncher.launch("image/*");
+                            else onTakePhotoAction();
+                        })
+                .setNegativeButton(R.string.dialog_cancel, null)
+                .show();
+    }
+
+    /**
+     * Takes a photo with the camera app. The camera app writes the image straight into the app's
+     * image directory (via a FileProvider uri), so no copying is required afterwards.
+     */
+    private void onTakePhotoAction() {
+        File dir = getImageDirOrNull();
+        if (dir == null || !(dir.exists() || dir.mkdirs())) {
+            showToast(getString(R.string.edit_transaction_image_error_no_storage));
+            return;
+        }
+        if (!isCameraAvailable()) {
+            showToast(getString(R.string.edit_transaction_image_error_camera_not_found));
+            return;
+        }
+        String filename = FileUtils.getNextImageFilename(dir) + "." + CAMERA_IMAGE_EXTENSION;
+        File destFile = new File(dir, filename);
+        Uri destUri;
+        try {
+            destUri = FileProvider.getUriForFile(requireContext(),
+                    EditTransactionImageViewHolder.fileProviderAuthority(requireContext()),
+                    destFile);
+            // destFile is deliberately not created here: FileProvider.openFile() creates it on
+            // first write, so a cancelled capture leaves no empty file behind
+        } catch (IllegalArgumentException e) {
+            Log.e(TAG, Objects.requireNonNull(e.getMessage()));
+            showToast(getString(R.string.edit_transaction_image_error_copying, e.getMessage()));
+            return;
+        }
+        pendingCaptureFilename = filename;
+        try {
+            takePictureLauncher.launch(destUri);
+        } catch (ActivityNotFoundException e) {
+            // not expected, since isCameraAvailable() checked beforehand, but a camera app can
+            // still be disabled or uninstalled in between
+            pendingCaptureFilename = null;
+            showToast(getString(R.string.edit_transaction_image_error_camera_not_found));
+        }
+    }
+
+    /**
+     * Handles the result of a camera capture, linking the photo to the transaction just like a
+     * gallery image.
+     */
+    private void onPictureCaptured(boolean success) {
+        String filename = pendingCaptureFilename;
+        pendingCaptureFilename = null;
+        File dir = getImageDirOrNull();
+        if (filename == null || dir == null || viewModel == null) return;
+        File file = new File(dir, filename);
+        if (!success) {
+            // cancelled: stay silent, matching the behaviour of the gallery picker
+            if (file.exists()) file.delete();
+            return;
+        }
+        // some camera apps report success without having written an image
+        if (!file.isFile() || file.length() == 0) {
+            file.delete();
+            showToast(getString(R.string.edit_transaction_image_error_capture));
+            return;
+        }
+        viewModel.addImageLink(filename);
+    }
+
+    private boolean isCameraAvailable() {
+        Intent intent = new Intent(MediaStore.ACTION_IMAGE_CAPTURE);
+        return requireContext().getPackageManager().resolveActivity(intent, 0) != null;
+    }
+
+    private void showToast(@NonNull String message) {
+        if (isAdded()) {
+            Toast.makeText(requireContext(), message, Toast.LENGTH_LONG).show();
+        }
     }
 
     private void setupSpinnerName() {
@@ -620,9 +750,39 @@ public class EditTransactionFragment extends DialogFragment {
         return getImageDir(requireContext());
     }
 
+    // getExternalFilesDir() may return null if no external storage volume is mounted, in which
+    // case the path returned by getImageDir() cannot be constructed
+    @Nullable
+    private File getImageDirOrNull() {
+        if (!isAdded()) return null;
+        return getImageDirOrNull(requireContext());
+    }
+
     // static version for use in SettingsFragment
     @NonNull
     public static File getImageDir(@NonNull Context context) {
         return new File(context.getExternalFilesDir(null), IMAGE_SUBDIR);
+    }
+
+    @Nullable
+    public static File getImageDirOrNull(@NonNull Context context) {
+        File externalFilesDir = context.getExternalFilesDir(null);
+        if (externalFilesDir == null) return null;
+        return new File(externalFilesDir, IMAGE_SUBDIR);
+    }
+
+    // TakePicture() does not add any uri grant flags to the capture intent, but since Android 11
+    // camera apps cannot write directly into /storage/emulated/0/Android/data/<pkg>/files/...
+    // and need the grant in order to write to the FileProvider uri at all
+    private static class TakePictureWithUriGrants extends ActivityResultContracts.TakePicture {
+        @NonNull
+        @Override
+        public Intent createIntent(@NonNull Context context, @NonNull Uri input) {
+            Intent intent = super.createIntent(context, input)
+                    .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+            // Intent#setClipData() returns void, so it cannot be chained
+            intent.setClipData(ClipData.newRawUri("", input));
+            return intent;
+        }
     }
 }

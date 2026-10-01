@@ -108,8 +108,12 @@ public class EditTransactionViewModel extends AndroidViewModel {
 
     public void deleteOrphanedImageFiles(File imageBasedir) {
         List<String> filenamesDb = imageRepository.getAllImageFilenames();
+        // filenamesDir would be null if imageBasedir does not denote a directory or if an I/O
+        // error occurs. In this case nothing is deleted.
         String[] filenamesDir = imageBasedir.list();
-        assert filenamesDir != null;
+        if (filenamesDir == null) {
+            return;
+        }
         for (String filenameDir:filenamesDir) {
             if (!filenamesDb.contains(filenameDir)) {
                 File orphanedImageFile = new File(imageBasedir, filenameDir);

@@ -103,8 +103,13 @@
 
     <string name="edit_transaction_image_delete_desc">delete image</string>
     <string name="edit_transaction_image_add_title">add image</string>
+    <string name="edit_transaction_image_source_gallery">Choose from gallery</string>
+    <string name="edit_transaction_image_source_camera">Take photo</string>
     <string name="edit_transaction_image_error_copying">Copying image to app directory failed. %1$s</string>
     <string name="edit_transaction_image_error_app_not_found">No app to show an image found on your device.</string>
+    <string name="edit_transaction_image_error_camera_not_found">No camera app found on your device.</string>
+    <string name="edit_transaction_image_error_capture">Taking a photo failed. The camera did not return an image.</string>
+    <string name="edit_transaction_image_error_no_storage">The image directory is not available.</string>
     <string name="edit_transaction_actionmode_title">Image selected</string>
 
     <!-- EditPersonFragment -->

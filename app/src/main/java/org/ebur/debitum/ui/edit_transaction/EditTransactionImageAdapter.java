@@ -2,26 +2,24 @@ package org.ebur.debitum.ui.edit_transaction;
 
 import android.view.ViewGroup;
 
-import androidx.activity.result.ActivityResultLauncher;
 import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
 import androidx.recyclerview.widget.DiffUtil;
 import androidx.recyclerview.widget.ListAdapter;
 
 import java.io.File;
-import java.io.FileInputStream;
-import java.util.Arrays;
 
 public class EditTransactionImageAdapter
         extends ListAdapter<File, EditTransactionImageViewHolder> {
 
-    private final ActivityResultLauncher<String> addImageLauncher;
+    private final EditTransactionImageViewHolder.AddImageCallback addImageCallback;
     private final EditTransactionImageViewHolder.DeleteImageCallback deleteCallback;
 
     public EditTransactionImageAdapter(@NonNull DiffUtil.ItemCallback<File> diffCallback,
-                                       @NonNull ActivityResultLauncher<String> addImageLauncher,
+                                       @NonNull EditTransactionImageViewHolder.AddImageCallback addImageCallback,
                                        @NonNull EditTransactionImageViewHolder.DeleteImageCallback deleteCallback) {
         super(diffCallback);
-        this.addImageLauncher = addImageLauncher;
+        this.addImageCallback = addImageCallback;
         this.deleteCallback = deleteCallback;
         //setHasStableIds(true);
     }
@@ -29,7 +27,7 @@ public class EditTransactionImageAdapter
     @NonNull
     @Override
     public EditTransactionImageViewHolder onCreateViewHolder(@NonNull ViewGroup parent, int viewType) {
-        return EditTransactionImageViewHolder.create(parent, addImageLauncher, deleteCallback);
+        return EditTransactionImageViewHolder.create(parent, addImageCallback, deleteCallback);
     }
 
     @Override
@@ -45,34 +43,21 @@ public class EditTransactionImageAdapter
 
     static class Diff extends DiffUtil.ItemCallback<File> {
 
+        // the last element of the list is a null placeholder for adding images, so both callbacks
+        // have to tolerate null values
         @Override
-        public boolean areItemsTheSame(@NonNull File oldItem, @NonNull File newItem) {
+        public boolean areItemsTheSame(@Nullable File oldItem, @Nullable File newItem) {
+            if (oldItem == null || newItem == null) return oldItem == null && newItem == null;
             return oldItem.getName().equals(newItem.getName());
         }
 
+        // image filenames are unique and immutable while the transaction is being edited, so
+        // comparing name and length is sufficient. Deliberately not comparing file contents,
+        // which would read whole (potentially multi-megabyte) camera images on every list update.
         @Override
-        public boolean areContentsTheSame(@NonNull File oldItem, @NonNull File newItem) {
-            return compareFiles(oldItem, newItem);
-        }
-
-        // from https://stackoverflow.com/questions/38527245/how-to-compare-two-java-io-file-programmatically
-        public boolean compareFiles(@NonNull File file1, @NonNull File file2) {
-            if(file1.length() != file2.length()) {
-                return false;
-            }
-            byte[] buffer1 = new byte[1024];
-            byte[] buffer2 = new byte[1024];
-            try {
-                FileInputStream fileInputStream1 = new FileInputStream(file1);
-                FileInputStream fileInputStream2 = new FileInputStream(file2);
-                while (fileInputStream1.read(buffer1) != -1) {
-                    if (fileInputStream2.read(buffer2) != -1 && !Arrays.equals(buffer1, buffer2))
-                        return false;
-                }
-                return true;
-            } catch (Exception ignore) {
-                return false;
-            }
+        public boolean areContentsTheSame(@Nullable File oldItem, @Nullable File newItem) {
+            if (oldItem == null || newItem == null) return oldItem == null && newItem == null;
+            return oldItem.getName().equals(newItem.getName()) && oldItem.length() == newItem.length();
         }
     }
 }
