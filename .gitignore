@@ -1,0 +1,7 @@
+.gradle
+.opencode
+test-results
+reports
+intermediates
+tmp
+generated
